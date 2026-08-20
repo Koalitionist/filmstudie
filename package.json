@@ -1,0 +1,21 @@
+{
+  "name": "filmstudie",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "workspaces": [
+    "server",
+    "studio",
+    "video"
+  ],
+  "scripts": {
+    "setup": "bash scripts/setup.sh",
+    "start": "npm run build -w studio && node server/src/index.js",
+    "server": "node server/src/index.js",
+    "build": "npm run build -w studio",
+    "test": "node scripts/integration-test.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
