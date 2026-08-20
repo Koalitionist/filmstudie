@@ -121,6 +121,24 @@ function Editor({ manifest }: { manifest: Manifest }) {
   );
   const timeline = useMemo(() => buildTimeline(props), [props]);
 
+  // Undo history for cut operations (Cmd/Ctrl+Z).
+  const history = useRef<Cut[][]>([]);
+  const pushHistory = useCallback((current: Cut[]) => {
+    history.current.push(current);
+    if (history.current.length > 100) history.current.shift();
+  }, []);
+  const updateCuts = useCallback(
+    (next: Cut[]) => {
+      pushHistory(cuts);
+      setCuts(next);
+    },
+    [cuts, pushHistory]
+  );
+  const undo = useCallback(() => {
+    const prev = history.current.pop();
+    if (prev) setCuts(prev);
+  }, []);
+
   // frame + play-state tracking from the Player
   useEffect(() => {
     const p = playerRef.current;
@@ -195,21 +213,36 @@ function Editor({ manifest }: { manifest: Manifest }) {
     (sourceId: string) => {
       const f = playerRef.current?.getCurrentFrame() ?? frame;
       if (activeSourceAt(f) === sourceId) return;
-      setCuts((prev) => [...prev.filter((c) => c.atFrame !== f), { atFrame: f, sourceId }]);
+      updateCuts([...cuts.filter((c) => c.atFrame !== f), { atFrame: f, sourceId }]);
     },
-    [frame, activeSourceAt]
+    [frame, activeSourceAt, cuts, updateCuts]
   );
 
   const deleteCutAtPlayhead = useCallback(() => {
     const f = playerRef.current?.getCurrentFrame() ?? frame;
-    setCuts((prev) => {
-      const containing = [...prev]
-        .sort((a, b) => a.atFrame - b.atFrame)
-        .filter((c) => c.atFrame <= f)
-        .pop();
-      return containing ? prev.filter((c) => c !== containing) : prev;
-    });
-  }, [frame]);
+    const containing = [...cuts]
+      .sort((a, b) => a.atFrame - b.atFrame)
+      .filter((c) => c.atFrame <= f)
+      .pop();
+    if (containing) updateCuts(cuts.filter((c) => c !== containing));
+  }, [frame, cuts, updateCuts]);
+
+  // Live boundary drag: history is pushed once at drag start, not per move.
+  const moveCut = useCallback(
+    (fromFrame: number, toFrame: number): number | null => {
+      const sorted = [...cuts].sort((a, b) => a.atFrame - b.atFrame);
+      const idx = sorted.findIndex((c) => c.atFrame === fromFrame);
+      if (idx < 0) return null;
+      const min = idx > 0 ? sorted[idx - 1].atFrame + 1 : 1;
+      const max =
+        idx < sorted.length - 1 ? sorted[idx + 1].atFrame - 1 : timeline.durationInFrames - 1;
+      const clamped = Math.max(min, Math.min(max, toFrame));
+      if (clamped === fromFrame) return fromFrame;
+      setCuts(cuts.map((c) => (c.atFrame === fromFrame ? { ...c, atFrame: clamped } : c)));
+      return clamped;
+    },
+    [cuts, timeline.durationInFrames]
+  );
 
   // keyboard: 1..9 switch, space play/pause, arrows step, backspace delete cut
   useEffect(() => {
@@ -229,11 +262,14 @@ function Editor({ manifest }: { manifest: Manifest }) {
         p.seekTo(Math.max(0, Math.min(timeline.durationInFrames - 1, p.getCurrentFrame() + step)));
       } else if (e.key === 'Backspace' || e.key === 'Delete') {
         deleteCutAtPlayhead();
+      } else if ((e.metaKey || e.ctrlKey) && e.key === 'z') {
+        e.preventDefault();
+        undo();
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [sources, addCut, deleteCutAtPlayhead, timeline.durationInFrames]);
+  }, [sources, addCut, deleteCutAtPlayhead, undo, timeline.durationInFrames]);
 
   if (sources.length === 0) {
     return (
@@ -274,6 +310,9 @@ function Editor({ manifest }: { manifest: Manifest }) {
             ))}
           </select>
         </label>
+        <button disabled={cuts.length === 0} onClick={() => updateCuts([])}>
+          Clear cuts
+        </button>
         <label className="kind">
           preview&nbsp;
           <select value={format} onChange={(e) => setFormat(e.target.value as FilmFormat)}>
@@ -378,30 +417,120 @@ function Editor({ manifest }: { manifest: Manifest }) {
         </div>
       </div>
 
-      <div
-        className="timeline"
-        onClick={(e) => {
-          const rect = e.currentTarget.getBoundingClientRect();
-          const f = Math.round(((e.clientX - rect.left) / rect.width) * timeline.durationInFrames);
-          playerRef.current?.seekTo(Math.max(0, Math.min(timeline.durationInFrames - 1, f)));
-        }}
-      >
-        {timeline.segments.map((seg) => (
+      <Timeline
+        timeline={timeline}
+        cuts={cuts}
+        fps={fps}
+        frame={frame}
+        colorOf={colorOf}
+        onSeek={(f) => playerRef.current?.seekTo(f)}
+        onDeleteCutAt={(atFrame) => updateCuts(cuts.filter((c) => c.atFrame !== atFrame))}
+        onMoveCut={moveCut}
+        onDragStart={() => pushHistory(cuts)}
+      />
+    </div>
+  );
+}
+
+function Timeline({
+  timeline,
+  cuts,
+  fps,
+  frame,
+  colorOf,
+  onSeek,
+  onDeleteCutAt,
+  onMoveCut,
+  onDragStart,
+}: {
+  timeline: ReturnType<typeof buildTimeline>;
+  cuts: Cut[];
+  fps: number;
+  frame: number;
+  colorOf: (id: string) => string;
+  onSeek: (frame: number) => void;
+  onDeleteCutAt: (atFrame: number) => void;
+  onMoveCut: (fromFrame: number, toFrame: number) => number | null;
+  onDragStart: () => void;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const drag = useRef<{ type: 'scrub' } | { type: 'cut'; atFrame: number } | null>(null);
+  const duration = timeline.durationInFrames;
+
+  const frameAt = (clientX: number) => {
+    const r = ref.current!.getBoundingClientRect();
+    return Math.max(0, Math.min(duration - 1, Math.round(((clientX - r.left) / r.width) * duration)));
+  };
+
+  const explicitCuts = [...cuts].sort((a, b) => a.atFrame - b.atFrame);
+
+  return (
+    <div
+      ref={ref}
+      className="timeline"
+      onPointerDown={(e) => {
+        const target = e.target as HTMLElement;
+        if (target.closest('.seg-x')) return;
+        e.currentTarget.setPointerCapture(e.pointerId);
+        const handle = target.closest('.cut-handle') as HTMLElement | null;
+        if (handle) {
+          drag.current = { type: 'cut', atFrame: Number(handle.dataset.frame) };
+          onDragStart();
+        } else {
+          drag.current = { type: 'scrub' };
+          onSeek(frameAt(e.clientX));
+        }
+      }}
+      onPointerMove={(e) => {
+        if (!drag.current) return;
+        const f = frameAt(e.clientX);
+        if (drag.current.type === 'scrub') {
+          onSeek(f);
+        } else {
+          const moved = onMoveCut(drag.current.atFrame, f);
+          if (moved !== null) drag.current.atFrame = moved;
+        }
+      }}
+      onPointerUp={() => (drag.current = null)}
+      onPointerCancel={() => (drag.current = null)}
+    >
+      {timeline.segments.map((seg) => {
+        const deletable = cuts.some((c) => c.atFrame === seg.start);
+        return (
           <div
             key={`${seg.start}-${seg.sourceId}`}
             className="seg"
             style={{
-              width: `${(seg.len / timeline.durationInFrames) * 100}%`,
+              width: `${(seg.len / duration) * 100}%`,
               background: colorOf(seg.sourceId),
             }}
             title={`${seg.sourceId} @ ${formatFrame(seg.start, fps)}`}
+          >
+            <span className="seg-label">{seg.sourceId}</span>
+            {deletable && (
+              <button
+                className="seg-x"
+                title="Remove this cut (merges into the previous segment)"
+                onClick={() => onDeleteCutAt(seg.start)}
+              >
+                ×
+              </button>
+            )}
+          </div>
+        );
+      })}
+      {explicitCuts
+        .filter((c) => c.atFrame > 0 && c.atFrame < duration)
+        .map((c) => (
+          <div
+            key={c.atFrame}
+            className="cut-handle"
+            data-frame={c.atFrame}
+            style={{ left: `${(c.atFrame / duration) * 100}%` }}
+            title="Drag to move this cut"
           />
         ))}
-        <div
-          className="playhead"
-          style={{ left: `${(frame / timeline.durationInFrames) * 100}%` }}
-        />
-      </div>
+      <div className="playhead" style={{ left: `${(frame / duration) * 100}%` }} />
     </div>
   );
 }

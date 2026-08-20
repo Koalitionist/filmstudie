@@ -389,17 +389,79 @@ input {
 .timeline {
   position: relative;
   display: flex;
-  height: 52px;
+  height: 60px;
   margin: 0 1.2em 1.2em;
   border: 1px solid var(--border);
   border-radius: 8px;
   overflow: hidden;
   cursor: pointer;
+  touch-action: none;
+  user-select: none;
 }
 
 .timeline .seg {
+  position: relative;
   height: 100%;
   opacity: 0.75;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.timeline .seg:hover {
+  opacity: 0.95;
+}
+
+.timeline .seg-label {
+  font-size: 0.75em;
+  font-weight: 700;
+  color: #fff;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.timeline .seg-x {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  display: none;
+  padding: 0 0.45em;
+  border: none;
+  border-radius: 5px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  line-height: 1.4;
+}
+
+.timeline .seg:hover .seg-x {
+  display: block;
+}
+
+.timeline .cut-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 12px;
+  margin-left: -6px;
+  cursor: col-resize;
+  z-index: 2;
+}
+
+.timeline .cut-handle::after {
+  content: '';
+  position: absolute;
+  left: 5px;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: rgba(255, 255, 255, 0.9);
+}
+
+.timeline .cut-handle:hover::after {
+  width: 4px;
+  left: 4px;
 }
 
 .timeline .playhead {
