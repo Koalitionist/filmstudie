@@ -43,6 +43,15 @@ export default function Producer() {
   const [previews, setPreviews] = useState<Record<string, string>>({});
   const [locals, setLocals] = useState<LocalSource[]>([]);
   const [webcamChoices, setWebcamChoices] = useState<MediaDeviceInfo[] | null>(null);
+  // Screen/webcam shares can't survive a page reload (the browser requires a
+  // fresh pick), so remember what the last setup used and offer to restore it.
+  const [ghosts, setGhosts] = useState<{
+    screen: boolean;
+    webcam: { deviceId?: string; label?: string } | null;
+  }>(() => ({
+    screen: localStorage.getItem('filmstudie.lastScreen') === '1',
+    webcam: JSON.parse(localStorage.getItem('filmstudie.lastWebcam') ?? 'null'),
+  }));
   const [sessions, setSessions] = useState<Manifest[]>([]);
   const [toast, setToast] = useState<string | null>(null);
   const previewUrls = useRef<Record<string, string>>({});
@@ -107,6 +116,8 @@ export default function Producer() {
       const stream = await openScreen();
       const source = new CaptureSource({ name: 'screen', kind: 'local-screen', stream });
       setLocals((l) => [...l, { key: `screen-${Date.now()}`, source }]);
+      localStorage.setItem('filmstudie.lastScreen', '1');
+      setGhosts((g) => ({ ...g, screen: true }));
     } catch (err) {
       setToast(`Could not add screen: ${(err as Error).message}`);
     }
@@ -128,7 +139,7 @@ export default function Producer() {
     }
   };
 
-  const addWebcam = async (device?: MediaDeviceInfo) => {
+  const addWebcam = async (device?: { deviceId?: string; label?: string }) => {
     setWebcamChoices(null);
     try {
       const stream = await openWebcam(device?.deviceId);
@@ -138,6 +149,11 @@ export default function Producer() {
         ...l,
         { key: `webcam-${device?.deviceId ?? 'default'}-${Date.now()}`, source },
       ]);
+      localStorage.setItem(
+        'filmstudie.lastWebcam',
+        JSON.stringify({ deviceId: device?.deviceId, label: name })
+      );
+      setGhosts((g) => ({ ...g, webcam: { deviceId: device?.deviceId, label: name } }));
     } catch (err) {
       setToast(`Could not add camera: ${(err as Error).message}`);
     }
@@ -147,6 +163,14 @@ export default function Producer() {
     setLocals((l) => {
       const entry = l.find((e) => e.key === key);
       entry?.source.dispose();
+      // An intentional remove also forgets the source for future sessions.
+      if (entry?.source.kind === 'local-screen') {
+        localStorage.removeItem('filmstudie.lastScreen');
+        setGhosts((g) => ({ ...g, screen: false }));
+      } else if (entry?.source.kind === 'local-webcam') {
+        localStorage.removeItem('filmstudie.lastWebcam');
+        setGhosts((g) => ({ ...g, webcam: null }));
+      }
       return l.filter((e) => e.key !== key);
     });
   };
@@ -214,6 +238,18 @@ export default function Producer() {
             onRemove={() => removeLocal(l.key)}
           />
         ))}
+        {ghosts.screen && !locals.some((l) => l.source.kind === 'local-screen') && (
+          <div className="tile add">
+            <span className="kind">screen was in your last setup — reloads drop it</span>
+            <button onClick={() => void addScreen()}>Re-share screen</button>
+          </div>
+        )}
+        {ghosts.webcam && !locals.some((l) => l.source.kind === 'local-webcam') && (
+          <div className="tile add">
+            <span className="kind">{ghosts.webcam.label} was in your last setup</span>
+            <button onClick={() => void addWebcam(ghosts.webcam!)}>Re-add camera</button>
+          </div>
+        )}
         <div className="tile add">
           <button onClick={() => void addScreen()}>+ Mac screen</button>
           {webcamChoices ? (
