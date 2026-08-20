@@ -243,12 +243,34 @@ input {
 }
 
 .tile .frame {
+  position: relative;
   aspect-ratio: 16 / 9;
   background: #000;
   display: flex;
   align-items: center;
   justify-content: center;
   color: var(--dim);
+}
+
+.tile .frame .key {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 1;
+  background: rgba(13, 15, 18, 0.75);
+  color: #fff;
+  font-weight: 700;
+  padding: 1px 9px;
+  border-radius: 6px;
+}
+
+.tile.live {
+  outline: 3px solid var(--rec);
+  outline-offset: -1px;
+}
+
+.tile.live .frame .key {
+  background: var(--rec);
 }
 
 .tile .frame img,

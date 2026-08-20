@@ -7,6 +7,7 @@ import express from 'express';
 import qrcode from 'qrcode-terminal';
 import { Hub } from './hub.js';
 import { bonjourHost, lanIp } from './net.js';
+import { isFfmpegRendering, renderSessionFfmpeg } from './ffmpeg-render.js';
 import { isRendering, renderSession } from './render.js';
 import {
   listSessions,
@@ -54,18 +55,23 @@ app.post('/api/sessions/:id/edit', (req, res) => {
 });
 app.post('/api/sessions/:id/render', (req, res) => {
   const id = req.params.id;
-  if (isRendering(id)) {
+  if (isRendering(id) || isFfmpegRendering(id)) {
     res.status(409).json({ error: 'render already running' });
     return;
   }
-  // The headless render browser fetches footage over plain HTTP (it won't
-  // trust the mkcert cert): the CA helper server in HTTPS mode, the main
-  // server in HTTP mode.
-  const baseUrl = HTTP_MODE ? `http://127.0.0.1:${PORT}` : `http://127.0.0.1:${CA_PORT}`;
   const formats = Array.isArray(req.body?.formats) ? req.body.formats : undefined;
-  renderSession(id, { baseUrl, hub, formats }).catch((err) =>
-    console.error(`render ${id} failed: ${err.message}`)
-  );
+  if (req.body?.engine === 'remotion') {
+    // Legacy engine, kept for comparison. The headless render browser fetches
+    // footage over plain HTTP (it won't trust the mkcert cert).
+    const baseUrl = HTTP_MODE ? `http://127.0.0.1:${PORT}` : `http://127.0.0.1:${CA_PORT}`;
+    renderSession(id, { baseUrl, hub, formats }).catch((err) =>
+      console.error(`render ${id} failed: ${err.message}`)
+    );
+  } else {
+    renderSessionFfmpeg(id, { hub, formats }).catch((err) =>
+      console.error(`render ${id} failed: ${err.message}`)
+    );
+  }
   res.json({ ok: true });
 });
 app.post('/api/reveal', (req, res) => {

@@ -8,20 +8,21 @@ apps, no editing suite.
 
 **Produce** — the Mac shows a live grid of every angle with one big REC button. iPhone and
 iPad join by scanning a QR code in Safari; the Mac contributes its own screen and webcam as
-extra angles. While recording, every camera streams its footage to the Mac in real time, so
-when you hit stop the files are already there — remuxed, clock-synced, and organized into a
-session folder.
+extra angles. While recording, every camera streams its footage to the Mac in real time —
+and pressing `1`/`2`/`3` switches the live camera as you go, so the show is cut in real time
+like a vision mixer. Hit stop and the files are already there — remuxed, clock-synced, cuts
+included, organized into a session folder.
 
 ![The editor: cut between synced angles with number keys](docs/edit.png)
 
 **Edit** — synced multicam playback with the program monitor on the left and every angle on
-the right. Press `1`/`2`/`3` while it plays to cut cameras like a vision mixer. Pick which
-camera's audio runs continuously, rotate any angle in 90° steps (gorillapods happen), and hit
-Render.
+the right. Live cuts from the recording are already on the timeline; press `1`/`2`/`3` to
+re-cut, drag cut boundaries to fix a late switch, pick which camera's audio runs
+continuously, rotate any angle in 90° steps (gorillapods happen), and hit Render.
 
 **Publish** — one click renders both `out-4x5.mp4` (1080×1350 for Instagram and LinkedIn)
-and `out-9x16.mp4` (1080×1920 for YouTube Shorts and Reels) from the same edit, via
-[Remotion](https://remotion.dev).
+and `out-9x16.mp4` (1080×1920 for YouTube Shorts and Reels) from the same edit, via a
+hardware-accelerated ffmpeg pipeline — a clip renders in a few seconds, not realtime.
 
 ## How it works
 
@@ -44,8 +45,10 @@ flowchart LR
   against a ping-estimated clock offset. That lands angles within a frame or two of each
   other, which is plenty for hard cuts.
 - **Edit** — the edit is just data: a list of `{atFrame, sourceId}` cuts plus an audio
-  choice and per-angle rotations in `session.json`. The same Remotion composition drives the
-  editor preview and the server-side render, so what you see is exactly what renders.
+  choice and per-angle rotations in `session.json`. Live switches during recording and
+  editor changes both write the same cuts. The editor preview is a Remotion composition;
+  the render is a native ffmpeg filter graph (VideoToolbox-encoded, libx264 fallback) built
+  from the identical timeline math — with the Remotion renderer kept as a legacy engine.
 
 ## Requirements
 

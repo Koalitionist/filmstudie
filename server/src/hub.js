@@ -116,6 +116,8 @@ export class Hub {
         return this.startRecording();
       case 'record-stop':
         return this.stopRecording();
+      case 'live-cut':
+        return this.onLiveCut(msg);
       case 'recording-started':
         return this.onRecordingStarted(ws, msg);
       case 'recording-resume':
@@ -237,10 +239,20 @@ export class Hub {
       });
     }
     writeManifest(manifest);
-    this.recording = { sessionId, manifest, startedAt: Date.now(), active };
+    this.recording = { sessionId, manifest, startedAt: Date.now(), active, liveCuts: [] };
     this.broadcastCameras({ type: 'record-start', sessionId, serverTime: Date.now() });
+    this.broadcastProducers({ type: 'live-active', sourceId: manifest.sources[0]?.id ?? null });
     this.pushRoster();
     this.log(`recording started: ${sessionId} (${online.length} sources)`);
+  }
+
+  // Producer pressed a camera hotkey during recording: log the cut against
+  // the server clock now, convert to timeline frames at finalize.
+  onLiveCut(msg) {
+    const rec = this.recording;
+    if (!rec || rec.stopping || !rec.active.has(msg.sourceId)) return;
+    rec.liveCuts.push({ atMs: Date.now(), sourceId: msg.sourceId });
+    this.broadcastProducers({ type: 'live-active', sourceId: msg.sourceId });
   }
 
   onRecordingStarted(ws, msg) {
@@ -304,6 +316,25 @@ export class Hub {
         sourceId: id,
         status: entry.status,
       });
+    }
+    // Convert live switch presses (server-clock ms) into timeline frames:
+    // timeline zero is the moment every finalized camera was rolling.
+    if (rec.liveCuts?.length) {
+      const finalized = rec.manifest.sources.filter(
+        (s) => s.status === 'finalized' && s.recordStart
+      );
+      if (finalized.length) {
+        const t0 = Math.max(...finalized.map((s) => s.recordStart));
+        const fps = rec.manifest.fps ?? 30;
+        rec.manifest.cuts = rec.liveCuts
+          .filter((c) => finalized.some((s) => s.id === c.sourceId))
+          .map((c) => ({
+            atFrame: Math.max(0, Math.round(((c.atMs - t0) / 1000) * fps)),
+            sourceId: c.sourceId,
+          }));
+        writeManifest(rec.manifest);
+        this.log(`recording ${rec.sessionId}: ${rec.manifest.cuts.length} live cuts saved`);
+      }
     }
     this.broadcastProducers({
       type: 'record-state',

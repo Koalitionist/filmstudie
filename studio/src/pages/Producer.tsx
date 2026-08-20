@@ -54,6 +54,7 @@ export default function Producer() {
   }));
   const [sessions, setSessions] = useState<Manifest[]>([]);
   const [toast, setToast] = useState<string | null>(null);
+  const [liveActive, setLiveActive] = useState<string | null>(null);
   const previewUrls = useRef<Record<string, string>>({});
 
   const loadSessions = useCallback(async () => {
@@ -78,10 +79,12 @@ export default function Producer() {
         setFinalizing(msg.sessionId as string);
       } else if (msg.state === 'idle') {
         setFinalizing(null);
+        setLiveActive(null);
         setToast(`Session ${msg.sessionId} saved`);
         void loadSessions();
       }
     });
+    socket.on('live-active', (msg) => setLiveActive((msg.sourceId as string) ?? null));
     socket.on('finalize-progress', (msg) => {
       setToast(`Finalizing ${msg.sourceId}: ${msg.status}`);
     });
@@ -179,6 +182,32 @@ export default function Producer() {
   const localIds = new Set(locals.map((l) => l.source.sourceId).filter(Boolean));
   const remoteSources = roster.filter((s) => !localIds.has(s.id));
   const onlineCount = roster.filter((s) => s.online).length;
+  // Hotkey order matches manifest source order (= hub roster order), which is
+  // also how the editor numbers angles.
+  const switchOrder = roster.map((s) => s.id);
+  const keyOf = (id: string | null) => {
+    const i = id ? switchOrder.indexOf(id) : -1;
+    return i >= 0 ? i + 1 : null;
+  };
+  const liveCut = (sourceId: string) => {
+    if (recording && !finalizing) send({ type: 'live-cut', sourceId });
+  };
+
+  // 1..9 switches the live camera while recording — the show is cut in real
+  // time, so the video is ready the moment you hit stop.
+  useEffect(() => {
+    if (!recording) return;
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.target as HTMLElement)?.tagName === 'INPUT') return;
+      const idx = parseInt(e.key, 10);
+      if (idx >= 1 && idx <= switchOrder.length) {
+        send({ type: 'live-cut', sourceId: switchOrder[idx - 1] });
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [recording, switchOrder.join(',')]);
 
   return (
     <div className="producer-page">
@@ -189,6 +218,9 @@ export default function Producer() {
           {onlineCount} source{onlineCount === 1 ? '' : 's'}
         </span>
         <span className="spacer" />
+        {recording && !finalizing && (
+          <span className="kind">1–{switchOrder.length} switches the live camera</span>
+        )}
         {recording && <RecTimer startedAt={recording.startedAt} />}
         {finalizing ? (
           <span className="kind">finalizing {finalizing}…</span>
@@ -209,8 +241,13 @@ export default function Producer() {
 
       <main className="grid">
         {remoteSources.map((s) => (
-          <div className="tile" key={s.id}>
+          <div
+            className={`tile${recording && liveActive === s.id ? ' live' : ''}`}
+            key={s.id}
+            onClick={() => liveCut(s.id)}
+          >
             <div className="frame">
+              {keyOf(s.id) && <span className="key">{keyOf(s.id)}</span>}
               {previews[s.id] ? (
                 <img
                   src={previews[s.id]}
@@ -235,6 +272,9 @@ export default function Producer() {
             key={l.key}
             entry={l}
             recording={!!recording}
+            keyNumber={l.source.sourceId ? keyOf(l.source.sourceId) : null}
+            live={!!recording && !!l.source.sourceId && liveActive === l.source.sourceId}
+            onLiveCut={() => l.source.sourceId && liveCut(l.source.sourceId)}
             onRemove={() => removeLocal(l.key)}
           />
         ))}
@@ -322,10 +362,16 @@ function RecTimer({ startedAt }: { startedAt: number }) {
 function LocalTile({
   entry,
   recording,
+  keyNumber,
+  live,
+  onLiveCut,
   onRemove,
 }: {
   entry: LocalSource;
   recording: boolean;
+  keyNumber: number | null;
+  live: boolean;
+  onLiveCut: () => void;
   onRemove: () => void;
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -340,8 +386,9 @@ function LocalTile({
   }, [entry]);
 
   return (
-    <div className="tile">
+    <div className={`tile${live ? ' live' : ''}`} onClick={onLiveCut}>
       <div className="frame">
+        {keyNumber && <span className="key">{keyNumber}</span>}
         <video ref={videoRef} muted playsInline />
       </div>
       <div className="tile-bar">
