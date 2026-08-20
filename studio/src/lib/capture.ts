@@ -18,6 +18,10 @@ const PREVIEW_INTERVAL_MS = 200;
 const PREVIEW_MAX_DIM = 640;
 const PREVIEW_SKIP_BUFFERED = 1 * 1024 * 1024;
 const TIMESLICE_MS = 1000;
+// A roaming camera buffers unacked chunks while off WiFi. Past this cap the
+// recorder is stopped cleanly instead of letting iOS kill the tab (which
+// would lose everything) — buffered footage still uploads on reconnect.
+const MAX_PENDING_BYTES = 350 * 1024 * 1024;
 
 interface PendingChunk {
   offset: number;
@@ -28,6 +32,7 @@ export interface CaptureEvents {
   state: CaptureState;
   sourceId: string | null;
   error: string | null;
+  pendingBytes: number;
 }
 
 // One camera angle: owns a MediaStream and its own socket to the hub.
@@ -44,6 +49,8 @@ export class CaptureSource {
   state: CaptureState = 'connecting';
   error: string | null = null;
   rotation = 0;
+  videoBitsPerSecond = 10_000_000;
+  pendingBytes = 0;
 
   private clockOffset = 0; // serverTime - localTime
   private recorder: MediaRecorder | null = null;
@@ -57,11 +64,18 @@ export class CaptureSource {
   private previewCanvas = document.createElement('canvas');
   private listeners = new Set<(ev: CaptureEvents) => void>();
 
-  constructor(opts: { name: string; kind: CaptureKind; stream: MediaStream; rotation?: number }) {
+  constructor(opts: {
+    name: string;
+    kind: CaptureKind;
+    stream: MediaStream;
+    rotation?: number;
+    videoBitsPerSecond?: number;
+  }) {
     this.name = opts.name;
     this.kind = opts.kind;
     this.stream = opts.stream;
     this.rotation = opts.rotation ?? 0;
+    this.videoBitsPerSecond = opts.videoBitsPerSecond ?? 10_000_000;
 
     this.previewVideo = document.createElement('video');
     this.previewVideo.muted = true;
@@ -114,7 +128,12 @@ export class CaptureSource {
   }
 
   private emit() {
-    const ev = { state: this.state, sourceId: this.sourceId, error: this.error };
+    const ev = {
+      state: this.state,
+      sourceId: this.sourceId,
+      error: this.error,
+      pendingBytes: this.pendingBytes,
+    };
     this.listeners.forEach((fn) => fn(ev));
   }
 
@@ -192,13 +211,14 @@ export class CaptureSource {
     }
     this.sessionId = sessionId;
     this.pending = [];
+    this.pendingBytes = 0;
     this.nextOffset = 0;
     this.stopping = false;
     const mimeType = CaptureSource.pickMimeType();
     try {
       this.recorder = new MediaRecorder(this.stream, {
         mimeType,
-        videoBitsPerSecond: 10_000_000,
+        videoBitsPerSecond: this.videoBitsPerSecond,
         audioBitsPerSecond: 128_000,
       });
     } catch (err) {
@@ -227,7 +247,15 @@ export class CaptureSource {
         const chunk = { offset: this.nextOffset, data };
         this.nextOffset += data.byteLength;
         this.pending.push(chunk);
+        this.pendingBytes += data.byteLength;
         this.sendChunk(chunk);
+        // Off WiFi too long: stop cleanly before iOS kills the tab for memory.
+        // Everything buffered so far still uploads on reconnect.
+        if (this.pendingBytes > MAX_PENDING_BYTES && this.recorder?.state === 'recording') {
+          this.error = 'Offline too long — recording stopped to protect memory; footage so far is safe';
+          this.recorder.stop();
+        }
+        this.emit();
         this.maybeEof();
       });
     };
@@ -252,6 +280,8 @@ export class CaptureSource {
 
   private dropAcked(bytes: number) {
     this.pending = this.pending.filter((c) => c.offset + c.data.byteLength > bytes);
+    this.pendingBytes = this.pending.reduce((n, c) => n + c.data.byteLength, 0);
+    this.emit();
   }
 
   private maybeEof() {

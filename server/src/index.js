@@ -144,8 +144,10 @@ function banner() {
   console.log(`  Producer (this Mac):  ${producerUrl}`);
   console.log(`  Cameras (iPhone/iPad Safari): ${cameraUrl}\n`);
   qrcode.generate(cameraUrl, { small: true }, (qr) => console.log(qr));
-  console.log(`  First time on a device? Open http://${host}:${CA_PORT}/ (or http://${lanIp()}:${CA_PORT}/)`);
-  console.log('  to install the certificate. See README for the 30-second walkthrough.\n');
+  const setupUrl = `http://${lanIp()}:${CA_PORT}/`;
+  console.log(`  First time on a device? Scan this to install the certificate (${setupUrl}):\n`);
+  qrcode.generate(setupUrl, { small: true }, (qr) => console.log(qr));
+  console.log('  See README for the 30-second walkthrough.\n');
 }
 
 startMain();

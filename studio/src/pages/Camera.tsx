@@ -4,7 +4,20 @@ import { CaptureSource, CaptureState, openCamera } from '../lib/capture';
 const NAME_KEY = 'filmstudie.cameraName';
 const FACING_KEY = 'filmstudie.cameraFacing';
 const ROTATION_KEY = 'filmstudie.cameraRotation';
-const SUGGESTIONS = ['topdown', 'face', 'side'];
+const QUALITY_KEY = 'filmstudie.cameraQuality';
+const SUGGESTIONS = ['topdown', 'face', 'action', 'side'];
+
+// Lower bitrates suit older phones and roaming cameras on weak WiFi.
+const QUALITIES = [
+  { key: 'high', label: 'High · 10 Mbps', bps: 10_000_000 },
+  { key: 'medium', label: 'Medium · 6 Mbps', bps: 6_000_000 },
+  { key: 'low', label: 'Low · 3 Mbps', bps: 3_000_000 },
+] as const;
+
+function currentBitrate(): number {
+  const key = localStorage.getItem(QUALITY_KEY);
+  return QUALITIES.find((q) => q.key === key)?.bps ?? QUALITIES[0].bps;
+}
 
 type Facing = 'user' | 'environment';
 
@@ -29,6 +42,7 @@ export default function Camera() {
 
 function NameGate({ name, onStart }: { name: string; onStart: (name: string) => void }) {
   const [value, setValue] = useState(name);
+  const [quality, setQuality] = useState(() => localStorage.getItem(QUALITY_KEY) ?? 'high');
   return (
     <div className="camera-page">
       <div className="center-card">
@@ -48,6 +62,21 @@ function NameGate({ name, onStart }: { name: string; onStart: (name: string) => 
           autoCapitalize="none"
           autoCorrect="off"
         />
+        <p className="hint">Quality — pick Medium or Low for an older phone or a roaming camera.</p>
+        <div className="chip-row">
+          {QUALITIES.map((q) => (
+            <button
+              key={q.key}
+              style={quality === q.key ? { borderColor: 'var(--accent)' } : undefined}
+              onClick={() => {
+                localStorage.setItem(QUALITY_KEY, q.key);
+                setQuality(q.key);
+              }}
+            >
+              {q.label}
+            </button>
+          ))}
+        </div>
         <button className="big" disabled={!value.trim()} onClick={() => onStart(value.trim())}>
           Start camera
         </button>
@@ -74,6 +103,7 @@ function LiveCamera({ name, onRename }: { name: string; onRename: () => void }) 
   const [error, setError] = useState<string | null>(null);
   const [connected, setConnected] = useState(false);
   const [recSeconds, setRecSeconds] = useState(0);
+  const [pendingBytes, setPendingBytes] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -91,11 +121,13 @@ function LiveCamera({ name, onRename }: { name: string; onRename: () => void }) 
           kind: 'remote',
           stream,
           rotation: Number(localStorage.getItem(ROTATION_KEY)) || 0,
+          videoBitsPerSecond: currentBitrate(),
         });
         sourceRef.current = source;
         source.onChange((ev) => {
           setState(ev.state);
           setError(ev.error);
+          setPendingBytes(ev.pendingBytes);
         });
         source.socket.onOpen(() => setConnected(true));
         source.socket.onClose(() => setConnected(false));
@@ -178,6 +210,12 @@ function LiveCamera({ name, onRename }: { name: string; onRename: () => void }) 
       </div>
       {error && <div className="banner">{error}</div>}
       {!connected && <div className="banner">Reconnecting to studio…</div>}
+      {pendingBytes > 8 * 1024 * 1024 && (
+        <div className="banner" style={{ background: '#b8860b' }}>
+          Weak WiFi — {Math.round(pendingBytes / (currentBitrate() / 8))}s of footage buffered on
+          this device, uploads when the connection recovers
+        </div>
+      )}
       <video
         ref={videoRef}
         className="camera-video"
