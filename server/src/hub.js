@@ -121,6 +121,8 @@ export class Hub {
         return this.onLiveCut(msg);
       case 'camera-control':
         return this.onCameraControl(msg);
+      case 'remove-source':
+        return this.onRemoveSource(msg);
       case 'recording-started':
         return this.onRecordingStarted(ws, msg);
       case 'recording-resume':
@@ -250,6 +252,32 @@ export class Hub {
     this.log(`recording started: ${sessionId} (${online.length} sources)`);
   }
 
+  // Producer removes a source from the roster. A still-connected camera is
+  // told it was kicked (so its client stops auto-reconnecting) before the
+  // socket is closed.
+  onRemoveSource(msg) {
+    const src = this.sources.get(msg.sourceId);
+    if (!src) return;
+    if (this.recording?.active.has(src.id)) {
+      this.broadcastProducers({
+        type: 'error',
+        message: `Can't remove ${src.id} while recording`,
+      });
+      return;
+    }
+    if (src.ws) {
+      this.send(src.ws, { type: 'kicked' });
+      try {
+        src.ws.close();
+      } catch {
+        // already closing
+      }
+    }
+    this.sources.delete(src.id);
+    this.log(`camera removed by producer: ${src.id}`);
+    this.pushRoster();
+  }
+
   // Producer adjusts a camera remotely (zoom/torch): route to that camera.
   onCameraControl(msg) {
     const src = this.sources.get(msg.sourceId);
@@ -308,6 +336,13 @@ export class Hub {
     if (!rec || rec.finalizing) return;
     rec.finalizing = true;
     this.recording = null;
+    // Sources that dropped mid-recording were kept for resume; prune them now.
+    for (const [id, src] of this.sources) {
+      if (!src.ws) {
+        this.sources.delete(id);
+        this.log(`pruned stale camera: ${id}`);
+      }
+    }
     this.pushRoster();
     for (const [id, active] of rec.active) {
       await new Promise((resolve) => active.stream.end(resolve));

@@ -111,6 +111,11 @@ export class CaptureSource {
     this.socket.on('camera-control', (msg) => {
       void this.applyCameraControl(msg as { zoom?: number; torch?: boolean });
     });
+    this.socket.on('kicked', () => {
+      this.socket.close(); // stop auto-reconnect
+      this.error = 'Removed by the producer — reload the page to rejoin';
+      this.setState('interrupted');
+    });
     this.socket.on('hello-ack', (msg) => {
       this.sourceId = msg.sourceId as string;
       if (this.state === 'connecting') this.setState('live');

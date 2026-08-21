@@ -279,6 +279,17 @@ export default function Producer() {
               <span className="kind">{s.kind}</span>
               <span className="spacer" />
               {!s.online && <span className="kind">offline</span>}
+              {!recording && (
+                <button
+                  title="Remove this camera from the studio"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    send({ type: 'remove-source', sourceId: s.id });
+                  }}
+                >
+                  ✕
+                </button>
+              )}
             </div>
             {s.online && s.caps?.zoom && (
               <div className="tile-controls" onClick={(e) => e.stopPropagation()}>
