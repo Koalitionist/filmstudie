@@ -242,8 +242,17 @@ export default function Producer() {
     (ghosts.screen && !locals.some((l) => l.source.kind === 'local-screen') ? 1 : 0) +
     (ghosts.webcam && !locals.some((l) => l.source.kind === 'local-webcam') ? 1 : 0);
   const extraCells = switchOrder.length + ghostCells + 1;
-  const cols = extraCells <= 2 ? 3 : 4;
-  const rows = extraCells <= (cols - 2) * 2 ? 2 : 3;
+  // Pick the tightest grid whose free tracks (total minus the 2x2 program
+  // block) hold every cell — so the mosaic fills the screen with no dead space.
+  const GRID_CONFIGS: Array<[number, number]> = [
+    [3, 2],
+    [4, 2],
+    [3, 3],
+    [4, 3],
+    [5, 3],
+    [4, 4],
+  ];
+  const [cols, rows] = GRID_CONFIGS.find(([c, r]) => c * r - 4 >= extraCells) ?? [5, 4];
 
   const renderSourceCell = (id: string, big: boolean) => {
     const r = roster.find((s) => s.id === id);
