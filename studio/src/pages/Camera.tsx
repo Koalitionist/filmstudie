@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { CaptureSource, CaptureState, openCamera } from '../lib/capture';
+import { CameraCaps, CaptureSource, CaptureState, openCamera } from '../lib/capture';
 
 const NAME_KEY = 'filmstudie.cameraName';
 const FACING_KEY = 'filmstudie.cameraFacing';
@@ -104,6 +104,9 @@ function LiveCamera({ name, onRename }: { name: string; onRename: () => void }) 
   const [connected, setConnected] = useState(false);
   const [recSeconds, setRecSeconds] = useState(0);
   const [pendingBytes, setPendingBytes] = useState(0);
+  const [caps, setCaps] = useState<CameraCaps | null>(null);
+  const [zoom, setZoom] = useState(1);
+  const [torch, setTorch] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -124,10 +127,13 @@ function LiveCamera({ name, onRename }: { name: string; onRename: () => void }) 
           videoBitsPerSecond: currentBitrate(),
         });
         sourceRef.current = source;
+        setCaps(source.caps);
+        if (source.caps?.zoom) setZoom(source.caps.zoom.value);
         source.onChange((ev) => {
           setState(ev.state);
           setError(ev.error);
           setPendingBytes(ev.pendingBytes);
+          if (source?.caps?.zoom) setZoom(source.caps.zoom.value);
         });
         source.socket.onOpen(() => setConnected(true));
         source.socket.onClose(() => setConnected(false));
@@ -197,6 +203,18 @@ function LiveCamera({ name, onRename }: { name: string; onRename: () => void }) 
         >
           ⟳ {rotation}°
         </button>
+        {caps?.torch && (
+          <button
+            style={torch ? { borderColor: 'var(--accent)' } : undefined}
+            onClick={() => {
+              const next = !torch;
+              setTorch(next);
+              void sourceRef.current?.applyCameraControl({ torch: next });
+            }}
+          >
+            Torch
+          </button>
+        )}
         <button
           disabled={recording}
           onClick={() => {
@@ -223,6 +241,23 @@ function LiveCamera({ name, onRename }: { name: string; onRename: () => void }) 
         playsInline
         style={rotation ? { transform: `rotate(${rotation}deg)` } : undefined}
       />
+      {caps?.zoom && (
+        <div className="camera-zoom">
+          <span className="kind">×{zoom.toFixed(1)}</span>
+          <input
+            type="range"
+            min={caps.zoom.min}
+            max={caps.zoom.max}
+            step={caps.zoom.step}
+            value={zoom}
+            onChange={(e) => {
+              const v = Number(e.target.value);
+              setZoom(v);
+              void sourceRef.current?.applyCameraControl({ zoom: v });
+            }}
+          />
+        </div>
+      )}
       <div className={`camera-status${recording ? ' rec' : ''}`}>
         {recording
           ? `REC ${formatTime(recSeconds)}`

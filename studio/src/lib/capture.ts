@@ -35,6 +35,11 @@ export interface CaptureEvents {
   pendingBytes: number;
 }
 
+export interface CameraCaps {
+  zoom?: { min: number; max: number; step: number; value: number };
+  torch?: boolean;
+}
+
 // One camera angle: owns a MediaStream and its own socket to the hub.
 // Used identically by the phone /camera page and producer-local sources.
 // Media chunks are kept in a pending buffer until the server acks the byte
@@ -51,6 +56,8 @@ export class CaptureSource {
   rotation = 0;
   videoBitsPerSecond = 10_000_000;
   pendingBytes = 0;
+  caps: CameraCaps | null = null;
+  private videoTrack: MediaStreamTrack | null = null;
 
   private clockOffset = 0; // serverTime - localTime
   private recorder: MediaRecorder | null = null;
@@ -87,6 +94,8 @@ export class CaptureSource {
       track.addEventListener('mute', () => this.setInterrupted('camera muted by the system'));
       track.addEventListener('ended', () => this.setInterrupted('camera track ended'));
     }
+    this.videoTrack = this.stream.getVideoTracks()[0] ?? null;
+    this.caps = this.readCaps();
 
     this.socket = new StudioSocket();
     this.socket.onOpen(() => {
@@ -96,7 +105,11 @@ export class CaptureSource {
         name: this.name,
         kind: this.kind,
         rotation: this.rotation,
+        caps: this.caps as unknown as Record<string, unknown>,
       });
+    });
+    this.socket.on('camera-control', (msg) => {
+      void this.applyCameraControl(msg as { zoom?: number; torch?: boolean });
     });
     this.socket.on('hello-ack', (msg) => {
       this.sourceId = msg.sourceId as string;
@@ -120,6 +133,47 @@ export class CaptureSource {
   setRotation(deg: number) {
     this.rotation = deg;
     this.socket.send({ type: 'status', rotation: deg });
+  }
+
+  // Zoom/torch capabilities, where the platform exposes them (iOS 17+ Safari,
+  // Chrome with capable cameras). Feature-detected — absent means no control.
+  private readCaps(): CameraCaps | null {
+    const track = this.videoTrack;
+    // zoom/torch are beyond the TS lib's MediaTrackCapabilities
+    const caps = track?.getCapabilities?.() as Record<string, unknown> | undefined;
+    if (!caps) return null;
+    const settings = (track?.getSettings?.() ?? {}) as Record<string, unknown>;
+    const out: CameraCaps = {};
+    const zoom = caps.zoom as { min?: number; max?: number; step?: number } | undefined;
+    if (zoom && typeof zoom.min === 'number' && typeof zoom.max === 'number' && zoom.max > zoom.min) {
+      out.zoom = {
+        min: zoom.min,
+        max: zoom.max,
+        step: zoom.step || 0.1,
+        value: (settings.zoom as number) ?? zoom.min,
+      };
+    }
+    const torch = caps.torch as boolean | boolean[] | undefined;
+    if (torch === true || (Array.isArray(torch) && torch.includes(true))) out.torch = true;
+    return Object.keys(out).length ? out : null;
+  }
+
+  async applyCameraControl(control: { zoom?: number; torch?: boolean }) {
+    const track = this.videoTrack;
+    if (!track?.applyConstraints) return;
+    const advanced: Record<string, unknown> = {};
+    if (typeof control.zoom === 'number') advanced.zoom = control.zoom;
+    if (typeof control.torch === 'boolean') advanced.torch = control.torch;
+    if (!Object.keys(advanced).length) return;
+    try {
+      await track.applyConstraints({ advanced: [advanced] } as MediaTrackConstraints);
+    } catch {
+      // unsupported combination — settings below report what actually applied
+    }
+    const settings = (track.getSettings?.() ?? {}) as { zoom?: number; torch?: boolean };
+    if (this.caps?.zoom && typeof settings.zoom === 'number') this.caps.zoom.value = settings.zoom;
+    this.socket.send({ type: 'status', zoom: settings.zoom, torch: settings.torch });
+    this.emit();
   }
 
   onChange(fn: (ev: CaptureEvents) => void): () => void {

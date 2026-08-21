@@ -269,6 +269,45 @@ input {
   outline-offset: -1px;
 }
 
+.tile-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.6em;
+  padding: 0 0.8em 0.55em;
+  font-size: 0.85em;
+}
+
+.tile-controls input[type='range'] {
+  flex: 1;
+  accent-color: var(--accent);
+}
+
+.tile-controls button {
+  padding: 0.2em 0.6em;
+  font-size: 0.9em;
+}
+
+/* ---- camera page zoom ---- */
+
+.camera-zoom {
+  position: fixed;
+  left: 50%;
+  bottom: max(4.4em, calc(env(safe-area-inset-bottom) + 3.4em));
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 0.7em;
+  width: min(22em, 80vw);
+  padding: 0.5em 1em;
+  border-radius: 999px;
+  background: rgba(13, 15, 18, 0.85);
+}
+
+.camera-zoom input[type='range'] {
+  flex: 1;
+  accent-color: var(--accent);
+}
+
 .tile.live .frame .key {
   background: var(--rec);
 }

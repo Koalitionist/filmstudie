@@ -93,6 +93,7 @@ export class Hub {
         name: s.name,
         kind: s.kind,
         rotation: s.rotation ?? 0,
+        caps: s.caps ?? null,
         online: !!s.ws,
         recording: !!this.recording?.active.has(s.id),
       })),
@@ -118,6 +119,8 @@ export class Hub {
         return this.stopRecording();
       case 'live-cut':
         return this.onLiveCut(msg);
+      case 'camera-control':
+        return this.onCameraControl(msg);
       case 'recording-started':
         return this.onRecordingStarted(ws, msg);
       case 'recording-resume':
@@ -154,6 +157,7 @@ export class Hub {
       name: msg.name || id,
       kind: msg.kind || 'remote',
       rotation: Number(msg.rotation) || 0,
+      caps: msg.caps ?? null,
       ws,
     });
     this.send(ws, { type: 'hello-ack', sourceId: id, serverTime: Date.now() });
@@ -244,6 +248,14 @@ export class Hub {
     this.broadcastProducers({ type: 'live-active', sourceId: manifest.sources[0]?.id ?? null });
     this.pushRoster();
     this.log(`recording started: ${sessionId} (${online.length} sources)`);
+  }
+
+  // Producer adjusts a camera remotely (zoom/torch): route to that camera.
+  onCameraControl(msg) {
+    const src = this.sources.get(msg.sourceId);
+    if (src?.ws) {
+      this.send(src.ws, { type: 'camera-control', zoom: msg.zoom, torch: msg.torch });
+    }
   }
 
   // Producer pressed a camera hotkey during recording: log the cut against

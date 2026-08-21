@@ -7,6 +7,10 @@ interface RosterSource {
   name: string;
   kind: string;
   rotation?: number;
+  caps?: {
+    zoom?: { min: number; max: number; step: number; value: number };
+    torch?: boolean;
+  } | null;
   online: boolean;
   recording: boolean;
 }
@@ -55,6 +59,7 @@ export default function Producer() {
   const [sessions, setSessions] = useState<Manifest[]>([]);
   const [toast, setToast] = useState<string | null>(null);
   const [liveActive, setLiveActive] = useState<string | null>(null);
+  const [camState, setCamState] = useState<Record<string, { zoom?: number; torch?: boolean }>>({});
   const previewUrls = useRef<Record<string, string>>({});
 
   const loadSessions = useCallback(async () => {
@@ -90,6 +95,16 @@ export default function Producer() {
     });
     socket.on('source-status', (msg) => {
       if (msg.interrupted) setToast(`⚠ ${msg.sourceId}: ${msg.interrupted}`);
+      if (typeof msg.zoom === 'number' || typeof msg.torch === 'boolean') {
+        setCamState((s) => ({
+          ...s,
+          [msg.sourceId as string]: {
+            ...s[msg.sourceId as string],
+            ...(typeof msg.zoom === 'number' ? { zoom: msg.zoom } : {}),
+            ...(typeof msg.torch === 'boolean' ? { torch: msg.torch } : {}),
+          },
+        }));
+      }
     });
     socket.on('error', (msg) => setToast(String(msg.message)));
     socket.onBinary((kind, sourceId, payload) => {
@@ -265,6 +280,35 @@ export default function Producer() {
               <span className="spacer" />
               {!s.online && <span className="kind">offline</span>}
             </div>
+            {s.online && s.caps?.zoom && (
+              <div className="tile-controls" onClick={(e) => e.stopPropagation()}>
+                <span className="kind">×{(camState[s.id]?.zoom ?? s.caps.zoom.value).toFixed(1)}</span>
+                <input
+                  type="range"
+                  min={s.caps.zoom.min}
+                  max={s.caps.zoom.max}
+                  step={s.caps.zoom.step}
+                  value={camState[s.id]?.zoom ?? s.caps.zoom.value}
+                  onChange={(e) => {
+                    const zoom = Number(e.target.value);
+                    setCamState((st) => ({ ...st, [s.id]: { ...st[s.id], zoom } }));
+                    send({ type: 'camera-control', sourceId: s.id, zoom });
+                  }}
+                />
+                {s.caps.torch && (
+                  <button
+                    style={camState[s.id]?.torch ? { borderColor: 'var(--accent)' } : undefined}
+                    onClick={() => {
+                      const torch = !camState[s.id]?.torch;
+                      setCamState((st) => ({ ...st, [s.id]: { ...st[s.id], torch } }));
+                      send({ type: 'camera-control', sourceId: s.id, torch });
+                    }}
+                  >
+                    Torch
+                  </button>
+                )}
+              </div>
+            )}
           </div>
         ))}
         {locals.map((l) => (
