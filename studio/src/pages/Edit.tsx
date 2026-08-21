@@ -1,6 +1,4 @@
-import { Player, PlayerRef } from '@remotion/player';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { FilmComposition } from '../../../video/src/FilmComposition';
 import {
   buildTimeline,
   Cut,
@@ -9,7 +7,7 @@ import {
   FilmProps,
   FORMATS,
 } from '../../../video/src/types';
-import { StudioSocket } from '../lib/ws';
+import { Json, StudioSocket } from '../lib/ws';
 
 interface ManifestSource {
   id: string;
@@ -103,8 +101,6 @@ function Editor({ manifest }: { manifest: Manifest }) {
   const [audioSourceId, setAudioSourceId] = useState<string | null>(
     manifest.audioSource ?? sources[0]?.id ?? null
   );
-  const [frame, setFrame] = useState(0);
-  const [playing, setPlaying] = useState(false);
   const [format, setFormat] = useState<FilmFormat>('4:5');
   const [render, setRender] = useState<{
     state: 'idle' | 'running' | 'done' | 'error';
@@ -113,15 +109,70 @@ function Editor({ manifest }: { manifest: Manifest }) {
     files?: string[];
     message?: string;
   }>({ state: 'idle', progress: 0 });
-  const playerRef = useRef<PlayerRef>(null);
 
   const props: FilmProps = useMemo(
     () => ({ sources, cuts, audioSourceId, fps, format }),
     [sources, cuts, audioSourceId, fps, format]
   );
   const timeline = useMemo(() => buildTimeline(props), [props]);
+  const total = timeline.durationInFrames;
 
-  // Undo history for cut operations (Cmd/Ctrl+Z).
+  // ---- transport: our own playback clock (no media element drives time) ----
+  const [playing, setPlaying] = useState(false);
+  const [frame, setFrame] = useState(0);
+  const frameRef = useRef(0);
+  const playClock = useRef<{ t: number; f: number } | null>(null);
+
+  const setFrameBoth = useCallback((f: number) => {
+    frameRef.current = f;
+    setFrame(f);
+  }, []);
+
+  const seekTo = useCallback(
+    (f: number) => {
+      const clamped = Math.max(0, Math.min(total - 1, f));
+      if (playClock.current) playClock.current = { t: performance.now(), f: clamped };
+      setFrameBoth(clamped);
+    },
+    [total, setFrameBoth]
+  );
+
+  const toggle = useCallback(() => {
+    setPlaying((p) => {
+      if (!p && frameRef.current >= total - 1) setFrameBoth(0);
+      return !p;
+    });
+  }, [total, setFrameBoth]);
+
+  useEffect(() => {
+    if (!playing) {
+      playClock.current = null;
+      return;
+    }
+    playClock.current = { t: performance.now(), f: frameRef.current };
+    let raf = 0;
+    const tick = () => {
+      const c = playClock.current;
+      if (!c) return;
+      const f = c.f + ((performance.now() - c.t) / 1000) * fps;
+      if (f >= total - 1) {
+        setFrameBoth(total - 1);
+        setPlaying(false);
+        return;
+      }
+      setFrameBoth(f);
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [playing, fps, total, setFrameBoth]);
+
+  // Registry of the angle-tile <video> elements. The program canvas draws
+  // from these directly — no extra media streams (Chrome allows only 6
+  // concurrent connections per origin, and long sessions have big files).
+  const videoEls = useRef(new Map<string, HTMLVideoElement>());
+
+  // ---- undo history for cut operations (Cmd/Ctrl+Z) ----
   const history = useRef<Cut[][]>([]);
   const pushHistory = useCallback((current: Cut[]) => {
     history.current.push(current);
@@ -139,24 +190,7 @@ function Editor({ manifest }: { manifest: Manifest }) {
     if (prev) setCuts(prev);
   }, []);
 
-  // frame + play-state tracking from the Player
-  useEffect(() => {
-    const p = playerRef.current;
-    if (!p) return;
-    const onFrame = (e: { detail: { frame: number } }) => setFrame(e.detail.frame);
-    const onPlay = () => setPlaying(true);
-    const onPause = () => setPlaying(false);
-    p.addEventListener('frameupdate', onFrame);
-    p.addEventListener('play', onPlay);
-    p.addEventListener('pause', onPause);
-    return () => {
-      p.removeEventListener('frameupdate', onFrame);
-      p.removeEventListener('play', onPlay);
-      p.removeEventListener('pause', onPause);
-    };
-  }, []);
-
-  // auto-save cuts + audio choice (debounced)
+  // auto-save cuts + audio + rotations (debounced)
   const firstSave = useRef(true);
   useEffect(() => {
     if (firstSave.current) {
@@ -176,7 +210,7 @@ function Editor({ manifest }: { manifest: Manifest }) {
   // render progress over the hub socket
   useEffect(() => {
     const socket = new StudioSocket();
-    socket.onOpen(() => socket.send({ type: 'hello', role: 'producer' }));
+    socket.onOpen(() => socket.send({ type: 'hello', role: 'producer' } as Json));
     socket.on('render-progress', (msg) => {
       if (msg.sessionId === manifest.id)
         setRender({
@@ -211,21 +245,21 @@ function Editor({ manifest }: { manifest: Manifest }) {
 
   const addCut = useCallback(
     (sourceId: string) => {
-      const f = playerRef.current?.getCurrentFrame() ?? frame;
+      const f = Math.round(frameRef.current);
       if (activeSourceAt(f) === sourceId) return;
       updateCuts([...cuts.filter((c) => c.atFrame !== f), { atFrame: f, sourceId }]);
     },
-    [frame, activeSourceAt, cuts, updateCuts]
+    [activeSourceAt, cuts, updateCuts]
   );
 
   const deleteCutAtPlayhead = useCallback(() => {
-    const f = playerRef.current?.getCurrentFrame() ?? frame;
+    const f = frameRef.current;
     const containing = [...cuts]
       .sort((a, b) => a.atFrame - b.atFrame)
       .filter((c) => c.atFrame <= f)
       .pop();
     if (containing) updateCuts(cuts.filter((c) => c !== containing));
-  }, [frame, cuts, updateCuts]);
+  }, [cuts, updateCuts]);
 
   // Live boundary drag: history is pushed once at drag start, not per move.
   const moveCut = useCallback(
@@ -234,32 +268,30 @@ function Editor({ manifest }: { manifest: Manifest }) {
       const idx = sorted.findIndex((c) => c.atFrame === fromFrame);
       if (idx < 0) return null;
       const min = idx > 0 ? sorted[idx - 1].atFrame + 1 : 1;
-      const max =
-        idx < sorted.length - 1 ? sorted[idx + 1].atFrame - 1 : timeline.durationInFrames - 1;
+      const max = idx < sorted.length - 1 ? sorted[idx + 1].atFrame - 1 : total - 1;
       const clamped = Math.max(min, Math.min(max, toFrame));
       if (clamped === fromFrame) return fromFrame;
       setCuts(cuts.map((c) => (c.atFrame === fromFrame ? { ...c, atFrame: clamped } : c)));
       return clamped;
     },
-    [cuts, timeline.durationInFrames]
+    [cuts, total]
   );
 
   // keyboard: 1..9 switch, space play/pause, arrows step, backspace delete cut
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if ((e.target as HTMLElement)?.tagName === 'INPUT' || (e.target as HTMLElement)?.tagName === 'SELECT') return;
-      const p = playerRef.current;
-      if (!p) return;
+      const tag = (e.target as HTMLElement)?.tagName;
+      if (tag === 'INPUT' || tag === 'SELECT') return;
       const idx = parseInt(e.key, 10);
       if (idx >= 1 && idx <= sources.length) {
         addCut(sources[idx - 1].id);
       } else if (e.key === ' ') {
         e.preventDefault();
-        p.toggle();
+        toggle();
       } else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
         e.preventDefault();
         const step = (e.shiftKey ? 10 : 1) * (e.key === 'ArrowLeft' ? -1 : 1);
-        p.seekTo(Math.max(0, Math.min(timeline.durationInFrames - 1, p.getCurrentFrame() + step)));
+        seekTo(Math.round(frameRef.current) + step);
       } else if (e.key === 'Backspace' || e.key === 'Delete') {
         deleteCutAtPlayhead();
       } else if ((e.metaKey || e.ctrlKey) && e.key === 'z') {
@@ -269,7 +301,7 @@ function Editor({ manifest }: { manifest: Manifest }) {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [sources, addCut, deleteCutAtPlayhead, undo, timeline.durationInFrames]);
+  }, [sources, addCut, deleteCutAtPlayhead, undo, toggle, seekTo]);
 
   if (sources.length === 0) {
     return (
@@ -283,8 +315,11 @@ function Editor({ manifest }: { manifest: Manifest }) {
     );
   }
 
-  const colorOf = (id: string) => ANGLE_COLORS[sources.findIndex((s) => s.id === id) % ANGLE_COLORS.length];
+  const colorOf = (id: string) =>
+    ANGLE_COLORS[sources.findIndex((s) => s.id === id) % ANGLE_COLORS.length];
   const activeId = activeSourceAt(frame);
+  const activeSource = sources.find((s) => s.id === activeId) ?? null;
+  const audioSource = sources.find((s) => s.id === audioSourceId) ?? sources[0];
 
   return (
     <div className="edit-page">
@@ -293,8 +328,9 @@ function Editor({ manifest }: { manifest: Manifest }) {
           <button>←</button>
         </a>
         <h1>{manifest.id}</h1>
+        <button onClick={toggle}>{playing ? '❚❚' : '▶'}</button>
         <span className="kind">
-          {formatFrame(frame, fps)} / {formatFrame(timeline.durationInFrames, fps)}
+          {formatFrame(frame, fps)} / {formatFrame(total, fps)}
         </span>
         <span className="spacer" />
         <label className="kind">
@@ -374,22 +410,12 @@ function Editor({ manifest }: { manifest: Manifest }) {
       {render.state === 'error' && <div className="banner">Render failed: {render.message}</div>}
 
       <div className="edit-main">
-        <div className="edit-program">
-          <Player
-            ref={playerRef}
-            component={FilmComposition}
-            inputProps={props}
-            durationInFrames={timeline.durationInFrames}
-            fps={fps}
-            compositionWidth={FORMATS[format].width}
-            compositionHeight={FORMATS[format].height}
-            controls
-            acknowledgeRemotionLicense
-            style={{
-              height: '100%',
-              maxHeight: '70vh',
-              aspectRatio: `${FORMATS[format].width} / ${FORMATS[format].height}`,
-            }}
+        <div className="edit-program" onClick={toggle}>
+          <ProgramCanvas
+            width={FORMATS[format].width}
+            height={FORMATS[format].height}
+            activeSource={activeSource}
+            videoEls={videoEls}
           />
         </div>
         <div className="edit-angles">
@@ -408,6 +434,10 @@ function Editor({ manifest }: { manifest: Manifest }) {
               onRotate={() =>
                 setRotations((r) => ({ ...r, [s.id]: ((r[s.id] ?? 0) + 90) % 360 }))
               }
+              onVideoEl={(el) => {
+                if (el) videoEls.current.set(s.id, el);
+                else videoEls.current.delete(s.id);
+              }}
             />
           ))}
           <p className="hint">
@@ -417,17 +447,195 @@ function Editor({ manifest }: { manifest: Manifest }) {
         </div>
       </div>
 
+      {audioSource && (
+        <AudioTrack
+          src={audioSource.src}
+          trim={timeline.trim[audioSource.id] ?? 0}
+          fps={fps}
+          frame={frame}
+          playing={playing}
+        />
+      )}
+
       <Timeline
         timeline={timeline}
         cuts={cuts}
         fps={fps}
         frame={frame}
         colorOf={colorOf}
-        onSeek={(f) => playerRef.current?.seekTo(f)}
+        onSeek={seekTo}
         onDeleteCutAt={(atFrame) => updateCuts(cuts.filter((c) => c.atFrame !== atFrame))}
         onMoveCut={moveCut}
         onDragStart={() => pushHistory(cuts)}
       />
+    </div>
+  );
+}
+
+// The program monitor: a canvas that draws the active angle's tile video with
+// the same cover-crop + rotation math as the ffmpeg render. Reusing the tile
+// <video> elements keeps us inside the browser's per-origin connection limit.
+function ProgramCanvas({
+  width,
+  height,
+  activeSource,
+  videoEls,
+}: {
+  width: number;
+  height: number;
+  activeSource: EditSource | null;
+  videoEls: React.MutableRefObject<Map<string, HTMLVideoElement>>;
+}) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const activeRef = useRef(activeSource);
+  activeRef.current = activeSource;
+
+  useEffect(() => {
+    let raf = 0;
+    const draw = () => {
+      raf = requestAnimationFrame(draw);
+      const canvas = canvasRef.current;
+      const ctx = canvas?.getContext('2d');
+      if (!canvas || !ctx) return;
+      ctx.fillStyle = '#000';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      const active = activeRef.current;
+      const v = active ? videoEls.current.get(active.id) : null;
+      if (!v || !v.videoWidth) return;
+      // The <video> element already applies the file's own display matrix;
+      // only the user-set rotation is applied here (mirrors the render).
+      const rot = (((active!.rotation ?? 0) % 360) + 360) % 360;
+      const quarter = rot === 90 || rot === 270;
+      const contentW = quarter ? v.videoHeight : v.videoWidth;
+      const contentH = quarter ? v.videoWidth : v.videoHeight;
+      const scale = Math.max(canvas.width / contentW, canvas.height / contentH);
+      ctx.save();
+      ctx.translate(canvas.width / 2, canvas.height / 2);
+      ctx.rotate((rot * Math.PI) / 180);
+      ctx.scale(scale, scale);
+      ctx.drawImage(v, -v.videoWidth / 2, -v.videoHeight / 2, v.videoWidth, v.videoHeight);
+      ctx.restore();
+    };
+    raf = requestAnimationFrame(draw);
+    return () => cancelAnimationFrame(raf);
+  }, [videoEls]);
+
+  return (
+    <canvas
+      ref={canvasRef}
+      width={width}
+      height={height}
+      className="program-canvas"
+      style={{ aspectRatio: `${width} / ${height}` }}
+    />
+  );
+}
+
+// One continuous audio track, synced to the transport like the angle tiles.
+function AudioTrack({
+  src,
+  trim,
+  fps,
+  frame,
+  playing,
+}: {
+  src: string;
+  trim: number;
+  fps: number;
+  frame: number;
+  playing: boolean;
+}) {
+  const ref = useRef<HTMLAudioElement>(null);
+
+  useEffect(() => {
+    const a = ref.current;
+    if (!a) return;
+    const target = (frame + trim) / fps;
+    if (playing) {
+      if (a.paused) void a.play().catch(() => {});
+      if (Math.abs(a.currentTime - target) > 0.25) a.currentTime = target;
+    } else {
+      if (!a.paused) a.pause();
+      if (Math.abs(a.currentTime - target) > 0.05) a.currentTime = target;
+    }
+  }, [frame, playing, trim, fps]);
+
+  return <audio ref={ref} src={src} preload="auto" />;
+}
+
+function AngleTile({
+  source,
+  index,
+  fps,
+  trim,
+  frame,
+  playing,
+  active,
+  color,
+  onCut,
+  onRotate,
+  onVideoEl,
+}: {
+  source: EditSource;
+  index: number;
+  fps: number;
+  trim: number;
+  frame: number;
+  playing: boolean;
+  active: boolean;
+  color: string;
+  onCut: () => void;
+  onRotate: () => void;
+  onVideoEl: (el: HTMLVideoElement | null) => void;
+}) {
+  const videoRef = useRef<HTMLVideoElement>(null);
+
+  // Keep the angle preview synced to the program playhead: exact while
+  // paused/seeking, drift-corrected while playing.
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v) return;
+    const target = (frame + trim) / fps;
+    if (playing) {
+      if (v.paused) void v.play().catch(() => {});
+      if (Math.abs(v.currentTime - target) > 0.2) v.currentTime = target;
+    } else {
+      if (!v.paused) v.pause();
+      if (Math.abs(v.currentTime - target) > 1 / fps) v.currentTime = target;
+    }
+  }, [frame, playing, trim, fps]);
+
+  return (
+    <div
+      className={`angle${active ? ' active' : ''}`}
+      style={active ? { borderColor: color } : undefined}
+      onClick={onCut}
+    >
+      <video
+        ref={(el) => {
+          (videoRef as React.MutableRefObject<HTMLVideoElement | null>).current = el;
+          onVideoEl(el);
+        }}
+        src={source.src}
+        muted
+        playsInline
+        preload="auto"
+        style={source.rotation ? { transform: `rotate(${source.rotation}deg)` } : undefined}
+      />
+      <span className="key" style={{ background: color }}>
+        {index + 1}
+      </span>
+      <span className="angle-name">{source.id}</span>
+      <button
+        className="angle-rotate"
+        title={`Rotate (now ${source.rotation ?? 0}°)`}
+        onClick={(e) => {
+          e.stopPropagation();
+          onRotate();
+        }}
+      >
+        ⟳
+      </button>
     </div>
   );
 }
@@ -535,80 +743,8 @@ function Timeline({
   );
 }
 
-function AngleTile({
-  source,
-  index,
-  fps,
-  trim,
-  frame,
-  playing,
-  active,
-  color,
-  onCut,
-  onRotate,
-}: {
-  source: EditSource;
-  index: number;
-  fps: number;
-  trim: number;
-  frame: number;
-  playing: boolean;
-  active: boolean;
-  color: string;
-  onCut: () => void;
-  onRotate: () => void;
-}) {
-  const videoRef = useRef<HTMLVideoElement>(null);
-
-  // Keep the angle preview synced to the program playhead: exact while
-  // paused/seeking, drift-corrected while playing.
-  useEffect(() => {
-    const v = videoRef.current;
-    if (!v) return;
-    const target = (frame + trim) / fps;
-    if (playing) {
-      if (v.paused) void v.play().catch(() => {});
-      if (Math.abs(v.currentTime - target) > 0.2) v.currentTime = target;
-    } else {
-      if (!v.paused) v.pause();
-      if (Math.abs(v.currentTime - target) > 1 / fps) v.currentTime = target;
-    }
-  }, [frame, playing, trim, fps]);
-
-  return (
-    <div
-      className={`angle${active ? ' active' : ''}`}
-      style={active ? { borderColor: color } : undefined}
-      onClick={onCut}
-    >
-      <video
-        ref={videoRef}
-        src={source.src}
-        muted
-        playsInline
-        preload="auto"
-        style={source.rotation ? { transform: `rotate(${source.rotation}deg)` } : undefined}
-      />
-      <span className="key" style={{ background: color }}>
-        {index + 1}
-      </span>
-      <span className="angle-name">{source.id}</span>
-      <button
-        className="angle-rotate"
-        title={`Rotate (now ${source.rotation ?? 0}°)`}
-        onClick={(e) => {
-          e.stopPropagation();
-          onRotate();
-        }}
-      >
-        ⟳
-      </button>
-    </div>
-  );
-}
-
 function formatFrame(f: number, fps: number) {
   const s = f / fps;
   const m = Math.floor(s / 60);
-  return `${m}:${String(Math.floor(s % 60)).padStart(2, '0')}.${String(f % fps).padStart(2, '0')}`;
+  return `${m}:${String(Math.floor(s % 60)).padStart(2, '0')}.${String(Math.floor(f) % fps).padStart(2, '0')}`;
 }

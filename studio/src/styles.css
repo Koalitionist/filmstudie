@@ -356,6 +356,15 @@ input {
   align-items: center;
   justify-content: center;
   min-width: 0;
+  cursor: pointer;
+}
+
+.program-canvas {
+  height: 100%;
+  max-height: 70vh;
+  max-width: 100%;
+  background: #000;
+  border-radius: 8px;
 }
 
 .edit-angles {
