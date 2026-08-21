@@ -148,7 +148,8 @@ function banner() {
   const cameraUrl = `https://${host}:${PORT}/camera`;
   console.log('\n  filmstudie studio is up\n');
   console.log(`  Producer (this Mac):  ${producerUrl}`);
-  console.log(`  Cameras (iPhone/iPad Safari): ${cameraUrl}\n`);
+  console.log(`  Cameras (iPhone/iPad Safari): ${cameraUrl}`);
+  console.log(`  If .local won't resolve on a device: https://${lanIp()}:${PORT}/camera\n`);
   qrcode.generate(cameraUrl, { small: true }, (qr) => console.log(qr));
   const setupUrl = `http://${lanIp()}:${CA_PORT}/`;
   console.log(`  First time on a device? Scan this to install the certificate (${setupUrl}):\n`);
