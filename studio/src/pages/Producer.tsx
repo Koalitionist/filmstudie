@@ -38,6 +38,14 @@ interface LocalSource {
   source: CaptureSource;
 }
 
+const CELL_COLORS = ['#5b9dff', '#3dd68c', '#f5a623', '#e5484d', '#b98aff', '#4dd0e1'];
+
+function textOn(hex: string): string {
+  const n = parseInt(hex.slice(1), 16);
+  const lum = 0.299 * ((n >> 16) & 255) + 0.587 * ((n >> 8) & 255) + 0.114 * (n & 255);
+  return lum > 150 ? '#0d0f12' : '#ffffff';
+}
+
 export default function Producer() {
   const socketRef = useRef<StudioSocket | null>(null);
   const [connected, setConnected] = useState(false);
@@ -47,6 +55,13 @@ export default function Producer() {
   const [previews, setPreviews] = useState<Record<string, string>>({});
   const [locals, setLocals] = useState<LocalSource[]>([]);
   const [webcamChoices, setWebcamChoices] = useState<MediaDeviceInfo[] | null>(null);
+  const [sessions, setSessions] = useState<Manifest[]>([]);
+  const [toast, setToast] = useState<string | null>(null);
+  const [liveActive, setLiveActive] = useState<string | null>(null);
+  const [camState, setCamState] = useState<Record<string, { zoom?: number; torch?: boolean }>>({});
+  const [programSel, setProgramSel] = useState<string | null>(null);
+  const previewUrls = useRef<Record<string, string>>({});
+
   // Screen/webcam shares can't survive a page reload (the browser requires a
   // fresh pick), so remember what the last setup used and offer to restore it.
   const [ghosts, setGhosts] = useState<{
@@ -56,15 +71,6 @@ export default function Producer() {
     screen: localStorage.getItem('filmstudie.lastScreen') === '1',
     webcam: JSON.parse(localStorage.getItem('filmstudie.lastWebcam') ?? 'null'),
   }));
-  const [sessions, setSessions] = useState<Manifest[]>([]);
-  const [toast, setToast] = useState<string | null>(null);
-  const [liveActive, setLiveActive] = useState<string | null>(null);
-  const [camState, setCamState] = useState<Record<string, { zoom?: number; torch?: boolean }>>({});
-  const previewUrls = useRef<Record<string, string>>({});
-
-  // Which source fills the program monitor: the live camera while recording,
-  // otherwise whichever tile the user clicked (default: first source).
-  const [programSel, setProgramSel] = useState<string | null>(null);
 
   const loadSessions = useCallback(async () => {
     const res = await fetch('/api/sessions');
@@ -198,8 +204,6 @@ export default function Producer() {
   };
 
   const send = (msg: Json) => socketRef.current?.send(msg);
-  const localIds = new Set(locals.map((l) => l.source.sourceId).filter(Boolean));
-  const remoteSources = roster.filter((s) => !localIds.has(s.id));
   const onlineCount = roster.filter((s) => s.online).length;
   // Hotkey order matches manifest source order (= hub roster order), which is
   // also how the editor numbers angles.
@@ -232,6 +236,49 @@ export default function Producer() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [recording, finalizing, switchOrder.join(',')]);
 
+  // Mosaic dimensions: the program cell takes a 2x2 block top-left; the other
+  // cells fill the remaining tracks.
+  const ghostCells =
+    (ghosts.screen && !locals.some((l) => l.source.kind === 'local-screen') ? 1 : 0) +
+    (ghosts.webcam && !locals.some((l) => l.source.kind === 'local-webcam') ? 1 : 0);
+  const extraCells = switchOrder.length + ghostCells + 1;
+  const cols = extraCells <= 2 ? 3 : 4;
+  const rows = extraCells <= (cols - 2) * 2 ? 2 : 3;
+
+  const renderSourceCell = (id: string, big: boolean) => {
+    const r = roster.find((s) => s.id === id);
+    const local = locals.find((l) => l.source.sourceId === id);
+    const n = keyOf(id);
+    const color = CELL_COLORS[((n ?? 1) - 1) % CELL_COLORS.length];
+    return (
+      <SourceCell
+        key={big ? '__program' : id}
+        big={big}
+        name={r?.name ?? id}
+        keyNumber={n}
+        color={color}
+        online={r?.online ?? false}
+        rotation={r?.rotation ?? 0}
+        caps={r?.caps ?? null}
+        state={camState[id]}
+        stream={local?.source.stream ?? null}
+        preview={previews[id]}
+        live={!!recording && liveActive === id}
+        selected={!recording && !big && programId === id}
+        showRemove={!recording && !big}
+        onClick={() => liveCut(id)}
+        onRemove={() => {
+          if (local) removeLocal(local.key);
+          else send({ type: 'remove-source', sourceId: id });
+        }}
+        onControl={(control) => {
+          setCamState((st) => ({ ...st, [id]: { ...st[id], ...control } }));
+          send({ type: 'camera-control', sourceId: id, ...control });
+        }}
+      />
+    );
+  };
+
   return (
     <div className="producer-page">
       <header className="producer-header">
@@ -262,114 +309,29 @@ export default function Producer() {
         )}
       </header>
 
-      <div className="producer-main">
-        <div className="program-pane">
-          {programId ? (
-            <ProgramMonitor
-              sourceId={programId}
-              roster={roster}
-              locals={locals}
-              preview={previews[programId]}
-              live={!!recording && liveActive === programId}
-              recording={!!recording}
-            />
-          ) : (
-            <span className="kind">add a camera to see it here</span>
-          )}
-        </div>
-        <main className="source-strip">
-        {remoteSources.map((s) => (
-          <div
-            className={`tile${recording && liveActive === s.id ? ' live' : ''}${!recording && programId === s.id ? ' selected' : ''}`}
-            key={s.id}
-            onClick={() => liveCut(s.id)}
-          >
-            <div className="frame">
-              {keyOf(s.id) && <span className="key">{keyOf(s.id)}</span>}
-              {previews[s.id] ? (
-                <img
-                  src={previews[s.id]}
-                  alt={s.name}
-                  style={s.rotation ? { transform: `rotate(${s.rotation}deg)` } : undefined}
-                />
-              ) : (
-                <span>no signal</span>
-              )}
-            </div>
-            <div className="tile-bar">
-              <span className={`dot ${s.recording ? 'rec' : s.online ? 'on' : ''}`} />
-              <strong>{s.name}</strong>
-              <span className="kind">{s.kind}</span>
-              <span className="spacer" />
-              {!s.online && <span className="kind">offline</span>}
-              {!recording && (
-                <button
-                  title="Remove this camera from the studio"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    send({ type: 'remove-source', sourceId: s.id });
-                  }}
-                >
-                  ✕
-                </button>
-              )}
-            </div>
-            {s.online && s.caps?.zoom && (
-              <div className="tile-controls" onClick={(e) => e.stopPropagation()}>
-                <span className="kind">×{(camState[s.id]?.zoom ?? s.caps.zoom.value).toFixed(1)}</span>
-                <input
-                  type="range"
-                  min={s.caps.zoom.min}
-                  max={s.caps.zoom.max}
-                  step={s.caps.zoom.step}
-                  value={camState[s.id]?.zoom ?? s.caps.zoom.value}
-                  onChange={(e) => {
-                    const zoom = Number(e.target.value);
-                    setCamState((st) => ({ ...st, [s.id]: { ...st[s.id], zoom } }));
-                    send({ type: 'camera-control', sourceId: s.id, zoom });
-                  }}
-                />
-                {s.caps.torch && (
-                  <button
-                    style={camState[s.id]?.torch ? { borderColor: 'var(--accent)' } : undefined}
-                    onClick={() => {
-                      const torch = !camState[s.id]?.torch;
-                      setCamState((st) => ({ ...st, [s.id]: { ...st[s.id], torch } }));
-                      send({ type: 'camera-control', sourceId: s.id, torch });
-                    }}
-                  >
-                    Torch
-                  </button>
-                )}
-              </div>
-            )}
-          </div>
-        ))}
-        {locals.map((l) => (
-          <LocalTile
-            key={l.key}
-            entry={l}
-            recording={!!recording}
-            keyNumber={l.source.sourceId ? keyOf(l.source.sourceId) : null}
-            live={!!recording && !!l.source.sourceId && liveActive === l.source.sourceId}
-            selected={!recording && !!l.source.sourceId && programId === l.source.sourceId}
-            onLiveCut={() => l.source.sourceId && liveCut(l.source.sourceId)}
-            onRemove={() => removeLocal(l.key)}
-          />
-        ))}
+      <main
+        className="mosaic"
+        style={{
+          gridTemplateColumns: `repeat(${cols}, 1fr)`,
+          gridTemplateRows: `repeat(${rows}, 1fr)`,
+          gridAutoFlow: 'row dense',
+        }}
+      >
+        {programId && renderSourceCell(programId, true)}
+        {switchOrder.map((id) => renderSourceCell(id, false))}
         {ghosts.screen && !locals.some((l) => l.source.kind === 'local-screen') && (
-          <div className="tile add">
+          <div className="cell add">
             <span className="kind">screen was in your last setup — reloads drop it</span>
             <button onClick={() => void addScreen()}>Re-share screen</button>
           </div>
         )}
         {ghosts.webcam && !locals.some((l) => l.source.kind === 'local-webcam') && (
-          <div className="tile add">
+          <div className="cell add">
             <span className="kind">{ghosts.webcam.label} was in your last setup</span>
             <button onClick={() => void addWebcam(ghosts.webcam!)}>Re-add camera</button>
           </div>
         )}
-        <div className="tile add">
+        <div className="cell add">
           <button onClick={() => void addScreen()}>+ Mac screen</button>
           {webcamChoices ? (
             <>
@@ -386,8 +348,7 @@ export default function Producer() {
           )}
           <span className="kind">iPhone/iPad: scan the QR in the terminal</span>
         </div>
-        </main>
-      </div>
+      </main>
 
       <section className="sessions">
         <h2>Sessions</h2>
@@ -439,104 +400,108 @@ function RecTimer({ startedAt }: { startedAt: number }) {
   );
 }
 
-// The big program view: the actual MediaStream for local sources, the latest
-// preview frame for remote cameras.
-function ProgramMonitor({
-  sourceId,
-  roster,
-  locals,
+// One mosaic cell: live MediaStream for local sources, preview frames for
+// remote cameras, with a sticky label and hover controls.
+function SourceCell({
+  big,
+  name,
+  keyNumber,
+  color,
+  online,
+  rotation,
+  caps,
+  state,
+  stream,
   preview,
   live,
-  recording,
+  selected,
+  showRemove,
+  onClick,
+  onRemove,
+  onControl,
 }: {
-  sourceId: string;
-  roster: RosterSource[];
-  locals: LocalSource[];
+  big: boolean;
+  name: string;
+  keyNumber: number | null;
+  color: string;
+  online: boolean;
+  rotation: number;
+  caps: RosterSource['caps'];
+  state?: { zoom?: number; torch?: boolean };
+  stream: MediaStream | null;
   preview?: string;
   live: boolean;
-  recording: boolean;
-}) {
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const local = locals.find((l) => l.source.sourceId === sourceId);
-  const rosterEntry = roster.find((s) => s.id === sourceId);
-  const rotation = rosterEntry?.rotation ?? 0;
-
-  useEffect(() => {
-    if (local && videoRef.current) {
-      videoRef.current.srcObject = local.source.stream;
-      void videoRef.current.play().catch(() => {});
-    }
-  }, [local]);
-
-  return (
-    <>
-      {local ? (
-        <video ref={videoRef} className="program-media" muted playsInline />
-      ) : preview ? (
-        <img
-          className="program-media"
-          src={preview}
-          alt={sourceId}
-          style={rotation ? { transform: `rotate(${rotation}deg)` } : undefined}
-        />
-      ) : (
-        <div className="program-media program-empty">no signal</div>
-      )}
-      <div className="program-label">
-        <span className={`dot ${live ? 'rec' : 'on'}`} />
-        <strong>{rosterEntry?.name ?? sourceId}</strong>
-        <span className="kind">{recording ? (live ? 'LIVE' : '') : 'preview'}</span>
-      </div>
-    </>
-  );
-}
-
-function LocalTile({
-  entry,
-  recording,
-  keyNumber,
-  live,
-  selected,
-  onLiveCut,
-  onRemove,
-}: {
-  entry: LocalSource;
-  recording: boolean;
-  keyNumber: number | null;
-  live: boolean;
   selected: boolean;
-  onLiveCut: () => void;
+  showRemove: boolean;
+  onClick: () => void;
   onRemove: () => void;
+  onControl: (c: { zoom?: number; torch?: boolean }) => void;
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
-  const [state, setState] = useState(entry.source.state);
 
   useEffect(() => {
-    if (videoRef.current) {
-      videoRef.current.srcObject = entry.source.stream;
+    if (stream && videoRef.current) {
+      videoRef.current.srcObject = stream;
       void videoRef.current.play().catch(() => {});
     }
-    return entry.source.onChange((ev) => setState(ev.state));
-  }, [entry]);
+  }, [stream]);
 
   return (
     <div
-      className={`tile${live ? ' live' : ''}${selected ? ' selected' : ''}`}
-      onClick={onLiveCut}
+      className={`cell${big ? ' big' : ''}${live ? ' live' : ''}${selected ? ' selected' : ''}`}
+      style={big ? { gridColumn: '1 / 3', gridRow: '1 / 3' } : undefined}
+      onClick={onClick}
     >
-      <div className="frame">
-        {keyNumber && <span className="key">{keyNumber}</span>}
+      {stream ? (
         <video ref={videoRef} muted playsInline />
+      ) : preview ? (
+        <img
+          src={preview}
+          alt={name}
+          style={rotation ? { transform: `rotate(${rotation}deg)` } : undefined}
+        />
+      ) : (
+        <div className="nosignal">no signal</div>
+      )}
+      <div className="sticky" style={{ background: live ? 'var(--rec)' : color, color: live ? '#fff' : textOn(color) }}>
+        {keyNumber !== null && <span className="num">{keyNumber}</span>}
+        <span className="nm">{name}</span>
       </div>
-      <div className="tile-bar">
-        <span className={`dot ${state === 'recording' ? 'rec' : 'on'}`} />
-        <strong>{entry.source.name}</strong>
-        <span className="kind">{entry.source.kind}</span>
-        <span className="spacer" />
-        <button disabled={recording} onClick={onRemove}>
-          Remove
+      <span className={`cell-status dot ${live ? 'rec' : online ? 'on' : ''}`} />
+      {!online && <div className="nosignal">offline</div>}
+      {showRemove && (
+        <button
+          className="cell-x"
+          title="Remove this camera from the studio"
+          onClick={(e) => {
+            e.stopPropagation();
+            onRemove();
+          }}
+        >
+          ✕
         </button>
-      </div>
+      )}
+      {online && caps?.zoom && (
+        <div className="cell-controls" onClick={(e) => e.stopPropagation()}>
+          <span className="kind">×{(state?.zoom ?? caps.zoom.value).toFixed(1)}</span>
+          <input
+            type="range"
+            min={caps.zoom.min}
+            max={caps.zoom.max}
+            step={caps.zoom.step}
+            value={state?.zoom ?? caps.zoom.value}
+            onChange={(e) => onControl({ zoom: Number(e.target.value) })}
+          />
+          {caps.torch && (
+            <button
+              style={state?.torch ? { borderColor: 'var(--accent)' } : undefined}
+              onClick={() => onControl({ torch: !state?.torch })}
+            >
+              Torch
+            </button>
+          )}
+        </div>
+      )}
     </div>
   );
 }

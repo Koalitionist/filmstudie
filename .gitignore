@@ -4,3 +4,4 @@ sessions/
 server/certs/
 .DS_Store
 *.log
+studio/public/fonts/
