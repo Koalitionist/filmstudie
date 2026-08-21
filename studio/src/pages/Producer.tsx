@@ -273,7 +273,7 @@ export default function Producer() {
         stream={local?.source.stream ?? null}
         preview={previews[id]}
         live={!!recording && liveActive === id}
-        selected={!recording && !big && programId === id}
+        onAir={!big && programId === id}
         showRemove={!recording && !big}
         onClick={() => liveCut(id)}
         onRemove={() => {
@@ -423,7 +423,7 @@ function SourceCell({
   stream,
   preview,
   live,
-  selected,
+  onAir,
   showRemove,
   onClick,
   onRemove,
@@ -440,7 +440,7 @@ function SourceCell({
   stream: MediaStream | null;
   preview?: string;
   live: boolean;
-  selected: boolean;
+  onAir: boolean;
   showRemove: boolean;
   onClick: () => void;
   onRemove: () => void;
@@ -457,7 +457,7 @@ function SourceCell({
 
   return (
     <div
-      className={`cell${big ? ' big' : ''}${live ? ' live' : ''}${selected ? ' selected' : ''}`}
+      className={`cell${big ? ' big' : ''}${live ? ' live' : ''}${onAir ? ' onair' : ''}`}
       style={big ? { gridColumn: '1 / 3', gridRow: '1 / 3' } : undefined}
       onClick={onClick}
     >

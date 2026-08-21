@@ -314,9 +314,10 @@ input {
   outline-offset: -4px;
 }
 
-.cell.selected {
-  outline: 3px solid var(--accent);
-  outline-offset: -3px;
+/* The small cell of whatever is on the program monitor dims. */
+.cell.onair img,
+.cell.onair video {
+  filter: brightness(0.35);
 }
 
 .cell .cell-status {
