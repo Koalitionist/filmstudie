@@ -15,7 +15,8 @@ const MIME_CANDIDATES = [
 ];
 
 const PREVIEW_INTERVAL_MS = 200;
-const PREVIEW_MAX_DIM = 640;
+// Big enough to look decent on the producer's program monitor.
+const PREVIEW_MAX_DIM = 960;
 const PREVIEW_SKIP_BUFFERED = 1 * 1024 * 1024;
 const TIMESLICE_MS = 1000;
 // A roaming camera buffers unacked chunks while off WiFi. Past this cap the

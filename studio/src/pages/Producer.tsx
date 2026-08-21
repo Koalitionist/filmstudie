@@ -62,6 +62,10 @@ export default function Producer() {
   const [camState, setCamState] = useState<Record<string, { zoom?: number; torch?: boolean }>>({});
   const previewUrls = useRef<Record<string, string>>({});
 
+  // Which source fills the program monitor: the live camera while recording,
+  // otherwise whichever tile the user clicked (default: first source).
+  const [programSel, setProgramSel] = useState<string | null>(null);
+
   const loadSessions = useCallback(async () => {
     const res = await fetch('/api/sessions');
     if (res.ok) setSessions(await res.json());
@@ -206,23 +210,27 @@ export default function Producer() {
   };
   const liveCut = (sourceId: string) => {
     if (recording && !finalizing) send({ type: 'live-cut', sourceId });
+    else setProgramSel(sourceId);
   };
 
-  // 1..9 switches the live camera while recording — the show is cut in real
-  // time, so the video is ready the moment you hit stop.
+  const programId = (recording ? liveActive : null) ?? programSel ?? switchOrder[0] ?? null;
+
+  // 1..9 drives the program monitor: while recording it cuts the live camera
+  // (the show is edited in real time), while idle it switches the preview.
   useEffect(() => {
-    if (!recording) return;
     const onKey = (e: KeyboardEvent) => {
       if ((e.target as HTMLElement)?.tagName === 'INPUT') return;
       const idx = parseInt(e.key, 10);
       if (idx >= 1 && idx <= switchOrder.length) {
-        send({ type: 'live-cut', sourceId: switchOrder[idx - 1] });
+        const id = switchOrder[idx - 1];
+        if (recording && !finalizing) send({ type: 'live-cut', sourceId: id });
+        else setProgramSel(id);
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [recording, switchOrder.join(',')]);
+  }, [recording, finalizing, switchOrder.join(',')]);
 
   return (
     <div className="producer-page">
@@ -254,10 +262,25 @@ export default function Producer() {
         )}
       </header>
 
-      <main className="grid">
+      <div className="producer-main">
+        <div className="program-pane">
+          {programId ? (
+            <ProgramMonitor
+              sourceId={programId}
+              roster={roster}
+              locals={locals}
+              preview={previews[programId]}
+              live={!!recording && liveActive === programId}
+              recording={!!recording}
+            />
+          ) : (
+            <span className="kind">add a camera to see it here</span>
+          )}
+        </div>
+        <main className="source-strip">
         {remoteSources.map((s) => (
           <div
-            className={`tile${recording && liveActive === s.id ? ' live' : ''}`}
+            className={`tile${recording && liveActive === s.id ? ' live' : ''}${!recording && programId === s.id ? ' selected' : ''}`}
             key={s.id}
             onClick={() => liveCut(s.id)}
           >
@@ -329,6 +352,7 @@ export default function Producer() {
             recording={!!recording}
             keyNumber={l.source.sourceId ? keyOf(l.source.sourceId) : null}
             live={!!recording && !!l.source.sourceId && liveActive === l.source.sourceId}
+            selected={!recording && !!l.source.sourceId && programId === l.source.sourceId}
             onLiveCut={() => l.source.sourceId && liveCut(l.source.sourceId)}
             onRemove={() => removeLocal(l.key)}
           />
@@ -362,7 +386,8 @@ export default function Producer() {
           )}
           <span className="kind">iPhone/iPad: scan the QR in the terminal</span>
         </div>
-      </main>
+        </main>
+      </div>
 
       <section className="sessions">
         <h2>Sessions</h2>
@@ -414,11 +439,64 @@ function RecTimer({ startedAt }: { startedAt: number }) {
   );
 }
 
+// The big program view: the actual MediaStream for local sources, the latest
+// preview frame for remote cameras.
+function ProgramMonitor({
+  sourceId,
+  roster,
+  locals,
+  preview,
+  live,
+  recording,
+}: {
+  sourceId: string;
+  roster: RosterSource[];
+  locals: LocalSource[];
+  preview?: string;
+  live: boolean;
+  recording: boolean;
+}) {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const local = locals.find((l) => l.source.sourceId === sourceId);
+  const rosterEntry = roster.find((s) => s.id === sourceId);
+  const rotation = rosterEntry?.rotation ?? 0;
+
+  useEffect(() => {
+    if (local && videoRef.current) {
+      videoRef.current.srcObject = local.source.stream;
+      void videoRef.current.play().catch(() => {});
+    }
+  }, [local]);
+
+  return (
+    <>
+      {local ? (
+        <video ref={videoRef} className="program-media" muted playsInline />
+      ) : preview ? (
+        <img
+          className="program-media"
+          src={preview}
+          alt={sourceId}
+          style={rotation ? { transform: `rotate(${rotation}deg)` } : undefined}
+        />
+      ) : (
+        <div className="program-media program-empty">no signal</div>
+      )}
+      <div className="program-label">
+        <span className={`dot ${live ? 'rec' : 'on'}`} />
+        <strong>{rosterEntry?.name ?? sourceId}</strong>
+        <span className="kind">{recording ? (live ? 'LIVE' : '') : 'preview'}</span>
+      </div>
+    </>
+  );
+}
+
 function LocalTile({
   entry,
   recording,
   keyNumber,
   live,
+  selected,
   onLiveCut,
   onRemove,
 }: {
@@ -426,6 +504,7 @@ function LocalTile({
   recording: boolean;
   keyNumber: number | null;
   live: boolean;
+  selected: boolean;
   onLiveCut: () => void;
   onRemove: () => void;
 }) {
@@ -441,7 +520,10 @@ function LocalTile({
   }, [entry]);
 
   return (
-    <div className={`tile${live ? ' live' : ''}`} onClick={onLiveCut}>
+    <div
+      className={`tile${live ? ' live' : ''}${selected ? ' selected' : ''}`}
+      onClick={onLiveCut}
+    >
       <div className="frame">
         {keyNumber && <span className="key">{keyNumber}</span>}
         <video ref={videoRef} muted playsInline />
